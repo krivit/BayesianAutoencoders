@@ -288,7 +288,8 @@ class ptReplica(multiprocessing.Process):
 
         # ----------------
 
-    def likelihood_func(self, cae, data, w, tau_sq):
+    @staticmethod
+    def likelihood_func(cae, data, w, tau_sq, temp):
         # print("Inside likelihood_func")
         # y = data
         fx = cae.evaluate_proposal(data, w)
@@ -298,7 +299,7 @@ class ptReplica(multiprocessing.Process):
         # print(type(tau_sq))
         loss = torch.sum(torch.as_tensor((-0.5 * np.log(2 * math.pi * tau_sq) - 0.5 * np.square(fx) / tau_sq)))
         # print(type(loss))
-        return [loss / self.adapttemp, fx, mse]
+        return [loss / temp, fx, mse]
 
     def prior_likelihood(self, sigma_squared, w_list, tausq, nu_1, nu_2):
         # print("inside prior likelihood")
@@ -369,8 +370,8 @@ class ptReplica(multiprocessing.Process):
         delta_likelihood = 0.5  # an arbitrary position
         prior_current = self.prior_likelihood(sigma_squared, cae.getparameters(w), tau_pro, nu_1, nu_2)
 
-        [likelihood, pred_train, msetrain] = self.likelihood_func(cae, train, w, tau_pro)
-        [_, pred_test, msetest] = self.likelihood_func(cae, test, w, tau_pro)
+        [likelihood, pred_train, msetrain] = self.likelihood_func(cae, train, w, tau_pro, self.adapttemp)
+        [_, pred_test, msetest] = self.likelihood_func(cae, test, w, tau_pro, self.adapttemp)
 
         # Beginning Sampling using MCMC RANDOMWALK
 
@@ -427,8 +428,8 @@ class ptReplica(multiprocessing.Process):
                 self.adapttemp = self.temperature  # T1=T/log(k+1);
             if i == pt_samples and init_count == 0:  # Move to canonical MCMC
                 self.adapttemp = 1
-                [likelihood, pred_train, msetrain] = self.likelihood_func(cae, train, w, tau_sq=1)
-                [_, pred_test, msetest] = self.likelihood_func(cae, test, w, tau_sq=1)
+                [likelihood, pred_train, msetrain] = self.likelihood_func(cae, train, w, 1, self.adapttemp)
+                [_, pred_test, msetest] = self.likelihood_func(cae, test, w, 1, self.adapttemp)
                 init_count = 1
 
             lx = np.random.uniform(0, 1, 1)
@@ -458,8 +459,8 @@ class ptReplica(multiprocessing.Process):
 
             eta_pro = eta + np.random.normal(0, step_eta, 1)
             tau_pro = np.exp(eta_pro)
-            [likelihood_proposal, pred_train, msetrain] = self.likelihood_func(cae, train, w, tau_pro)
-            [likelihood_ignore, pred_test, msetest] = self.likelihood_func(cae, test, w, tau_pro)
+            [likelihood_proposal, pred_train, msetrain] = self.likelihood_func(cae, train, w, tau_pro, self.adapttemp)
+            [likelihood_ignore, pred_test, msetest] = self.likelihood_func(cae, test, w, tau_pro, self.adapttemp)
 
             prior_prop = self.prior_likelihood(sigma_squared,
                                                cae.getparameters(w_proposal), tau_pro, nu_1,
@@ -606,7 +607,7 @@ class ptReplica(multiprocessing.Process):
 
             if (i + 1) % self.swap_interval == 0:
                 param = np.concatenate([np.asarray([cae.getparameters(w)]).reshape(-1), np.asarray([eta]).reshape(-1),
-                                        np.asarray([likelihood]), np.asarray([self.temperature]), np.asarray([i])])
+                                        np.asarray([likelihood]), np.asarray([self.adapttemp]), np.asarray([i])])
                 self.parameter_queue.put(param)
                 self.signal_main.set()
                 self.event.clear()
@@ -626,7 +627,7 @@ class ptReplica(multiprocessing.Process):
         param = np.concatenate(
             [np.asarray([cae.getparameters(w)]).reshape(-1), np.asarray([eta]).reshape(-1),
              np.asarray([likelihood]),
-             np.asarray([self.temperature]), np.asarray([i])])
+             np.asarray([self.adapttemp]), np.asarray([i])])
         # print('SWAPPED PARAM',self.temperature,param)
         # self.parameter_queue.put(param)
         self.signal_main.set()
@@ -1007,8 +1008,10 @@ class ParallelTempering:
         T2 = param2[self.num_param + 2]
         # print('yo')
         # SWAPPING PROBABILITIES
+        lhood12 = ptReplica.likelihood_func(self.cae, self.traindata, w1, np.exp(eta1), T2)
+        lhood21 = ptReplica.likelihood_func(self.cae, self.traindata, w2, np.exp(eta2), T1)
         try:
-            swap_proposal = min(1, 0.5 * np.exp(lhood2 - lhood1))
+            swap_proposal = min(1, np.exp((lhood12 - lhood1) + (lhood21 - lhood2)))
         except OverflowError:
             swap_proposal = 1
         u = np.random.uniform(0, 1)
@@ -1019,6 +1022,10 @@ class ParallelTempering:
             param_temp = param1
             param1 = param2
             param2 = param_temp
+            param1[self.num_param + 1] = lhood21
+            param1[self.num_param + 2] = T2
+            param2[self.num_param + 1] = lhood12
+            param2[self.num_param + 2] = T1
         else:
             swapped = False
             self.total_swap_proposals += 1
